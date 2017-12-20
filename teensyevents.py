@@ -24,7 +24,7 @@ output the events that occur on that line of the teensy.
 
 from __future__ import print_function
 import argparse as arg
-import Teensy as t
+import pyteensy as t
 
 class CmdArgs(dict):
     """Just a dictionary with some static members"""
