@@ -19,6 +19,7 @@
 from __future__ import print_function
 import serial as s
 import serial.tools.list_ports
+import pyteensy_version as pv
 import struct
 import threading
 try:
@@ -29,8 +30,14 @@ except ImportError:
     import Queue as q
 
 def list_devices():
+    '''lists the available serial devices'''
     devs = serial.tools.list_ports.comports()
     return devs
+
+def version():
+    '''returns the current version of pyteensy.'''
+    return pv.get_version()
+
 
 ZEP_TEENSY_TO_ZEP_UUID = b"7d945241-0238-4c29-95e4-7d9864710ea2"
 ZEP_ZEP_TO_TEENSY_UUID = b"91ae4c34-00b0-4d91-9000-ccc0989ac92a"
@@ -509,6 +516,7 @@ class Teensy(object):
 
 
 def test():
+    print (version())
     print ("serial version = {}".format(s.VERSION))
     for i in list_devices():
         print(i)
