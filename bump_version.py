@@ -35,7 +35,7 @@ re_minor = re.compile(r'^pyteensy_minor\s*=\s*(\d+)$', re.M)
 re_micro = re.compile(r'^pyteensy_micro\s*=\s*(\d+)$', re.M)
 
 # the versioning file
-versionfile = 'pyteensy-version.py'
+versionfile = 'pyteensy_version.py'
 
 # contents of the versioning file.
 version_content = ""
