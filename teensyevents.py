@@ -33,6 +33,7 @@ class CmdArgs(dict):
     SINGLESHOTS = "singles"  # list of ints to be registered as singleshot
     PARALLELPORT= "parallel" # int flag
     PORT        = "port"     # int with 
+    UNIX        = "unix"     # flag whether or not to use the Unix teensy flavor.
 
 def parse_arguments():
     '''Parses commandline arguments'''
@@ -71,8 +72,15 @@ def parse_arguments():
         "-p",
         "--parallel",
         type=int,
-        help =("Use parallel port to run some tests specify a number"),
+        help ="Use parallel port to run some tests specify a number",
         default=-1
+        )
+    parser.add_argument(
+        '-u',
+        '--unix',
+        action = 'store_true',
+        help = "Instead of Teensy use a UnixTeensy class",
+        default=False
         )
 
     results = parser.parse_args()
@@ -94,6 +102,7 @@ def parse_arguments():
         d[d.DEVICE]     = results.device
     
     d[d.PARALLELPORT] = results.parallel
+    d[d.UNIX] = True if results.unix else False
 
     return d
 
@@ -160,8 +169,14 @@ def run_teensy_events():
                 file=sys.stderr)
             raise
     
+    # Select the proper Teensy Class
+    if arguments[arguments.UNIX]:
+        from pyteensy import UnixTeensy as Teensy
+    else:
+        from pyteensy import Teensy as Teensy
+
     trigtimes = []
-    with t.Teensy(arguments[arguments.DEVICE]) as teensy:
+    with Teensy(arguments[arguments.DEVICE]) as teensy:
         if not teensy.connected:
             exit(1)
         reg_lines(teensy, arguments)
