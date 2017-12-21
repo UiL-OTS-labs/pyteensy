@@ -34,6 +34,9 @@ class CmdArgs(dict):
     PARALLELPORT= "parallel" # int flag
     PORT        = "port"     # int with 
     UNIX        = "unix"     # flag whether or not to use the Unix teensy flavor.
+    MIN_JITTER  = "min-jitter"# float minimal jitter perion in seconds
+    MAX_JITTER  = "max-jitter"# float max jitter perion in seconds
+    NUMBER      = "number"   # float max jitter perion in seconds
 
 def parse_arguments():
     '''Parses commandline arguments'''
@@ -82,6 +85,31 @@ def parse_arguments():
         help = "Instead of Teensy use a UnixTeensy class",
         default=False
         )
+    parser.add_argument(
+        '--min-jitter',
+        type=float,
+        help=(
+            "Minimal jitter period in seconds, must be larger than 0, but "
+            "smaller than the --max-jitter option. The default value = 0.0 ."
+            ),
+        default=0.0
+        )
+    parser.add_argument(
+        '--max-jitter',
+        type=float,
+        help=(
+            "Maximum jitter period in seconds, must be larger than "
+            "the --min-jitter option. The default value = 1.0 ."
+            ),
+        default=1.0
+        )
+    parser.add_argument(
+        '-n',
+        '--number',
+        type=int,
+        help="The number toggles on the parallel port.",
+        default=120
+        )
 
     results = parser.parse_args()
 
@@ -103,6 +131,9 @@ def parse_arguments():
     
     d[d.PARALLELPORT] = results.parallel
     d[d.UNIX] = True if results.unix else False
+    d[d.MIN_JITTER] = results.min_jitter
+    d[d.MAX_JITTER] = results.max_jitter
+    d[d.NUMBER] = results.number
 
     return d
 
@@ -185,7 +216,14 @@ def run_teensy_events():
             print(
                 "Using the parallel port to determine whether the teensy works."
                 )
-            trigtimes = pp.pulse_train(parport, number=120, jitter=(0.0, 1.0))
+            trigtimes = pp.pulse_train(
+                parport,
+                number=arguments[arguments.NUMBER],
+                jitter=(
+                    arguments[arguments.MIN_JITTER],
+                    arguments[arguments.MAX_JITTER]
+                    )
+                )
             time.sleep(.5)
             compare_events(trigtimes, teensy.events)
         else:
