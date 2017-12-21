@@ -392,7 +392,8 @@ class Teensy(object):
                     answer = self._handle_task(task)
                     reply.put(answer)
                 except q.Empty:
-                    if self._serial.in_waiting:
+                    # Fetch events while we have incoming data.
+                    while self._serial.in_waiting:
                         self._fetch_event()
         except Exception:
             # Abort from thread when an uncaught exception occurs.
