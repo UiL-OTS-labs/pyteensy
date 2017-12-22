@@ -22,6 +22,9 @@
 from __future__ import print_function
 import struct
 import threading
+import select
+import os
+
 try:
     # python 3
     import queue as q
@@ -47,8 +50,16 @@ ZEP_TEENSY_TO_ZEP_UUID = b"7d945241-0238-4c29-95e4-7d9864710ea2"
 ZEP_ZEP_TO_TEENSY_UUID = b"91ae4c34-00b0-4d91-9000-ccc0989ac92a"
 
 class _TeensyPackage(object):
-    ''' TeensyPackages are the packages that are send over the serial
-    connection in order to communicate with a Teensy device.
+    '''TeensyPackages are the packages that are send over the serial
+    connection in order to communicate with a Teensy device. Teensy
+    package contain a bytearray as internal buffer. Currently, the buffer
+    can be at most 256 bytes long. A buffer contains a header of two bytes
+    The first byte indicates the total length of the buffer and the second
+    byte, determines the kind of message that is send.
+    So conceptualy the buffer is something like:
+    [messagesize, message type, 'p','a', 'y', 'l', 'o', 'a', 'd', '.', '.']
+    Hence, the smallest packet send is a header only packet and the largest
+    is a packet of 256 bytes with a header header + a payload of 254 bytes.
     '''
 
     # Message headers / identifies the type of message/package.
@@ -102,14 +113,30 @@ class _TeensyPackage(object):
         EVENT_TRIGGER           : _EVENT_TRIGGER.unpack
     }
 
+    _events = set([EVENT_TRIGGER])
+
     def parse_packet(self):
         '''Parses the bytearray self.buf and returns a tuple of
         size, message_type and payload or None
         '''
         return self._payload_dict[self.buf[1]](self.buf)
 
-    def __init__(self):
-        self.buf = bytearray([0])
+    def __init__(self, buffer: bytearray=bytearray()):
+        self.buf = buffer
+
+    def __iter__(self):
+        return iter(self.buf)
+
+    def set_buffer(self, buf: bytearray):
+        '''Set the buffer of the _TeensyPackage'''
+        self.buf = buf
+
+    def is_event(self) -> bool:
+        '''returns whether or not this packet contains an teensy event'''
+        if self.buf and len(self.buf) >= 2:
+            return self.pkgtype() in self._events
+        else:
+            return False
 
     def prepare_identify(self, uuid):
         '''Prepares a Teensy packet to send an identify message to the Teensy.
@@ -171,20 +198,6 @@ class _TeensyPackage(object):
                 )
             )
 
-    def read(self, reader):
-        '''Reads one entire TeensyPackage from the serial device.'''
-        tbuf = bytearray()
-        while not tbuf:
-            tbuf += bytearray(reader.read())
-        totsize = tbuf[0]
-        while len(tbuf) != totsize:
-            tbuf += reader.read(totsize - len(tbuf))
-        self.buf = tbuf
-
-    def write(self, writer):
-        '''Writes the contents of the buffer to the serial device.'''
-        writer.write(self.buf)
-
     def pkgtype(self):
         '''Returns the package type'''
         return self.buf[1]
@@ -233,13 +246,15 @@ class TeensyError(Exception):
     UNABLE_TO_CONNECT = 3
     INVALID_TRIGGER_LINE = 4
     TEENSY_ERROR = 5
+    UNABLE_TO_SYNC = 6
 
     _errdict = {
         NOT_A_TEENSY        : "Connected to something that is not a Teensy",
         NOT_CONNECTED       : "Operation requires a valid connection",
         UNABLE_TO_CONNECT   : "Unable to connect",
         INVALID_TRIGGER_LINE: "Invalid trigger line",
-        TEENSY_ERROR        : "Unspecified Teensy error."
+        TEENSY_ERROR        : "Unspecified Teensy error.",
+        UNABLE_TO_SYNC      : "Unable to synchronize the clock."
     }
 
     def __init__(self, error, extra=None):
@@ -287,9 +302,19 @@ class Teensy(object):
     '''Class that communicates with a teensy device.
 
     A device is opened on connection and subsequently a thread is started.
+    Writing to the teensy device occurs from the thread. The thread monitors
+    The eventqueue from the client and post a reply back, in the meanwhile the
+    thread monitors events from the Teensy device.
     '''
 
     READ_TIMEOUT = 0.0001
+
+    # Values used as for the _handle task these values must be negative
+    # otherwise they might get into conflict with the _TeensyPacket.SET_TIME
+    # etc values
+
+    #ask thread to sync the clocks.
+    SYNC_CLOCK = -1
 
     def __init__(self, devfn="/dev/ttyACM0"):
         ''' Opens communication with serial device.
@@ -341,8 +366,14 @@ class Teensy(object):
         self._aqueue = q.Queue()
         self.events = q.Queue()
 
+        self._start_thread()
+
+    def _start_thread(self):
+        ''' Starts the internal thread.
+        '''
         self._thread = threading.Thread(target=self.run, name=repr(self))
         self._thread.start()
+
         #sync with thread
         ans = self._aqueue.get(True, 1)
         if ans:
@@ -370,7 +401,8 @@ class Teensy(object):
                     answer = self._handle_task(task)
                     reply.put(answer)
                 except q.Empty:
-                    if self._serial.in_waiting:
+                    # Fetch events while we have incoming data.
+                    while self._serial.in_waiting:
                         self._fetch_event()
         except Exception:
             # Abort from thread when an uncaught exception occurs.
@@ -388,11 +420,32 @@ class Teensy(object):
         '''
         self.events.put(event)
 
+    def _read_packet(self, handle_event: bool=True)->_TeensyPackage:
+        '''Reads one packet from the stream, if it is an event it will be
+        handled.'''
+        while True:
+            tbuf = bytearray()
+            while not tbuf:
+                tbuf.extend(self._serial.read())
+            totsize = tbuf[0]
+            while len(tbuf) != totsize:
+                tbuf.extend(self._serial.read(totsize - len(tbuf)))
+            pkt = _TeensyPackage(tbuf)
+            if handle_event and pkt.is_event():
+                _, _, line, timestamp, logic = pkt.parse_packet()
+                self.handle_event(TeensyLineEvent(timestamp, line, logic))
+            else:
+                return pkt
+
+    def _write_packet(self, pkt: _TeensyPackage):
+        '''Write one teensy packet to the Teensy Device.'''
+        self._serial.write(pkt)
+        self._serial.flush()
+
     def _fetch_event(self):
         '''Try to read one event from the serial device.'''
-        package = _TeensyPackage()
-        package.read(self._serial)
-        assert package.pkgtype() == _TeensyPackage.EVENT_TRIGGER
+        package = self._read_packet(False)
+        assert package.is_event()
         _, _, line, timestamp, logic = package.parse_packet()
         event = TeensyLineEvent(timestamp, line, logic)
         self.handle_event(event)
@@ -401,8 +454,8 @@ class Teensy(object):
         '''Does a handshake with the teensy'''
         package = _TeensyPackage()
         package.prepare_identify(ZEP_ZEP_TO_TEENSY_UUID)
-        package.write(self._serial)
-        package.read(self._serial)
+        self._write_packet(package)
+        package = self._read_packet()
         _, type_, uuid = package.parse_packet()
         if type_ != _TeensyPackage.IDENTIFY:
             return TeensyError.NOT_A_TEENSY
@@ -425,8 +478,8 @@ class Teensy(object):
     def _register_line(self, line):
         package = _TeensyPackage()
         package.prepare_register(line)
-        package.write(self._serial)
-        package.read(self._serial)
+        self._write_packet(package)
+        package = self._read_packet()
         _, reply = package.parse_packet()
         if   reply == _TeensyPackage.ACKNOWLEDGE_SUCCES:
             return TeensyError.NO_ERROR
@@ -451,8 +504,8 @@ class Teensy(object):
     def _register_single_shot(self, line):
         package = _TeensyPackage()
         package.prepare_single_shot(line)
-        package.write(self._serial)
-        package.read(self._serial)
+        self._write_packet(package)
+        package = self._read_packet()
         _, reply, _ = package.parse_packet()
         if   reply == _TeensyPackage.ACKNOWLEDGE_SUCCES:
             return TeensyError.NO_ERROR
@@ -462,8 +515,7 @@ class Teensy(object):
             return TeensyError.TEENSY_ERROR
 
     def deregister_input(self, line):
-        ''' Deregister a previously registerd (single_shot) line.
-        '''
+        '''Deregister a previously registerd (single_shot) line.'''
         if not self.connected:
             raise TeensyError(TeensyError.NOT_CONNECTED)
         task = _TeensyTask(_TeensyPackage.DEREGISTER_INPUT, line)
@@ -475,8 +527,8 @@ class Teensy(object):
     def _deregister_input(self, line):
         package = _TeensyPackage()
         package.prepare_deregister(line)
-        package.write(self._serial)
-        package.read(self._serial)
+        self._write_packet(package)
+        package = self._read_packet()
         _, reply = package.parse_packet()
         assert reply == _TeensyPackage.ACKNOWLEDGE_SUCCES
         return TeensyError.NO_ERROR
@@ -496,21 +548,73 @@ class Teensy(object):
     def _time(self):
         package = _TeensyPackage()
         package.prepare_time()
-        package.write(self._serial)
-        package.read(self._serial)
+        self._write_packet(package)
+        package = self._read_packet()
         _, reply, time = package.parse_packet()
         if reply == _TeensyPackage.ACKNOWLEDGE_TIME:
             return TeensyError.NO_ERROR, time
         else:
             return TeensyError(TeensyError.TEENSY_ERROR), None
 
-    def time_set(self, time):
+    def time_set(self, time_us: int):
+        '''Sets the time in us on the teensy.
         '''
-        '''
-        pass
+        if not self.connected:
+            raise TeensyError(TeensyError.NOT_CONNECTED)
+        task = _TeensyTask(_TeensyPackage.DEREGISTER_INPUT, time_us)
+        self._tqueue.put(task)
+        reply = self._aqueue.get()
+        if reply:
+            raise TeensyError(reply)
 
-    def _time_set(self):
-        pass
+    def _time_set(self, time_us: int):
+        package = _TeensyPackage()
+        package.prepare_set_time(time_us)
+        self._write_packet(package)
+        package = self._read_packet()
+        _, reply = package.parse_packet()
+        assert reply == _TeensyPackage.ACKNOWLEDGE_SUCCES
+        return TeensyError.NO_ERROR
+
+    def sync_clock(self, cclock: callable, thres_us: int=100):
+        '''Synchronizes the teensy with the cclock. The cclock must be a
+        callable function or object that can safely operate from another
+        thread. Also when called it should provide time in a integral value
+        in us.
+        thres_us is the threshold, in order to sync the time is set and
+        asked back from the teensy, this returned value must be less than
+        the threshold.
+        Note although syncs the clocks, this function does not correct for
+        clock drift. Hence, over time, the clock of the Teensy might drift
+        away from cclock.
+        '''
+        if not self.connected:
+            raise TeensyError(TeensyError.NOT_CONNECTED)
+
+        if not isinstance(cclock(), int):
+            raise ValueError("cclock() must return an integer in µs")
+
+        task = _TeensyTask(self.SYNC_CLOCK, cclock, thres_us)
+        self._tqueue.put(task)
+        reply = self._aqueue.get()
+        if reply:
+            raise TeensyError(reply)
+
+    def _sync_clock(self, cclock: callable, thres_us: int=100) -> int:
+        synced = False
+        tries = 10
+        while not synced:
+            for _ in range(tries):
+                tim = cclock()
+                self._time_set(tim)
+                err, teensy_time = self._time()
+                if err:
+                    return err
+                synced = teensy_time - tim < thres_us
+                if synced:
+                    break
+            break
+        return TeensyError.NO_ERROR if synced else TeensyError.UNABLE_TO_SYNC
 
     def _handle_task(self, task):
         '''Handles a Teensy task, like registering a input line etc.
@@ -519,7 +623,11 @@ class Teensy(object):
         #alias
         tp = _TeensyPackage
         tasks = {
-            #tp.IDENTIFY             : None, # is handled differently
+            # values not from _TeensyPackage (these should be negative)
+            self.SYNC_CLOCK         : self._sync_clock,
+
+            #values from _TeensyPackage (these should be positive)
+            tp.IDENTIFY             : None, # is handled differently
             tp.REGISTER_INPUT       : self._register_line,
             tp.REGISTER_SINGLE_SHOT : self._register_single_shot,
             tp.DEREGISTER_INPUT     : self._deregister_input,
@@ -535,14 +643,138 @@ class Teensy(object):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
+class UnixTeensy(Teensy):
+
+    '''This class is just like the original teensy, however, it doesn't use
+    the serial library, but reads straight from a device file eeg:
+    /dev/ttyACM0.
+    If I use the serial library, I experience that using the serial library
+    consumes about all the processing power of one processor core. This class
+    is written to address that issue.
+    '''
+
+    def __init__(self, devfn="/dev/ttyACM0"):
+        ''' Opens communication with serial device.
+        devfn is a path to the device name or something like COM5 on windows.
+        '''
+        self.connected = False
+        self._quit = None   # Becomes an event to stop the thread.
+        self._thread = None   # Becomes the thread on connection
+        self._tqueue = None   # Becomes Task queue on connection
+        self._aqueue = None   # Becomes Answer queue on connection
+        self.events = None   # Becomes queue for events on connection
+
+        if devfn:
+            self.connect(devfn)
+        else:
+            self._serial = None
+
+    def close(self):
+        ''' Closes the thread and the serial connection
+        Make sure not to forget to call this function when you don't need
+        the teensy anymore. In case of emergency use
+        the "with Teensy() as instance:" syntax. If you forget to use this
+        the thread doesn't shut down.
+        '''
+        self._quit.set()
+        self._thread.join(0.1)
+        if self._thread.isAlive():
+            raise RuntimeError("Unable to close Teensy thread.")
+        os.close(self._serial)
+
+    def connect(self, devfn):
+        '''Connects the instance of a Teensy class with an actual teensy
+        instance. If the connection is successful, the internal thread
+        to communicate with the device is started.
+        '''
+        if self.connected:
+            self.close()
+
+        flags = os.O_RDWR
+        try:
+            # UNIX flavors
+            flags |= os.O_NOCTTY
+        except AttributeError:
+            # windows
+            flags |= os.O_BINARY
+
+        try:
+            self._serial = os.open(devfn, flags)
+        except OSError as err:
+            raise TeensyError(TeensyError.UNABLE_TO_CONNECT, str(err))
+
+        # empty queues to be sure.
+        self._tqueue = q.Queue()
+        self._aqueue = q.Queue()
+        self.events = q.Queue()
+
+        self._start_thread()
+
+    def run(self):
+        ''' The Teensy thread, the Teensy is read from or written to from here.
+        '''
+        assert self._serial
+        self._quit = threading.Event()
+        timeout = 0.001 #one millisecond
+        tasks = self._tqueue
+        reply = self._aqueue
+
+        try:
+            self._identify()
+
+            #sync with client
+            reply.put(TeensyError.NO_ERROR)
+
+            poller = select.poll()
+            poller.register(self._serial, select.POLLIN)
+
+            while not self._quit.is_set():
+                try:
+                    task = tasks.get(True, timeout)
+                    answer = self._handle_task(task)
+                    reply.put(answer)
+                except q.Empty:
+                    fevents = poller.poll(timeout)
+                    while fevents:
+                        self._fetch_event()
+                        fevents = poller.poll(timeout)
+
+        except Exception:
+            # Abort from thread when an uncaught exception occurs.
+            import sys
+            import traceback
+            print(traceback.print_exc(), file=sys.stderr)
+            self.connected = False
+            return
+
+    def _read_packet(self, handle_event: bool=True) -> _TeensyPackage:
+        '''Reads one packet from the stream, if it is an event it will be
+        handled.'''
+        while True:
+            tbuf = bytearray()
+            while not tbuf:
+                tbuf.extend(os.read(self._serial, 1))
+            totsize = tbuf[0]
+            while len(tbuf) != totsize:
+                tbuf.extend(os.read(self._serial, totsize - len(tbuf)))
+            pkt = _TeensyPackage(tbuf)
+            if handle_event and pkt.is_event():
+                _, _, line, timestamp, logic = pkt.parse_packet()
+                self.handle_event(TeensyLineEvent(timestamp, line, logic))
+            else:
+                return pkt
+
+    def _write_packet(self, pkt: _TeensyPackage):
+        '''Write one teensy packet to the Teensy Device.'''
+        os.write(self._serial, pkt.buf)
+
 def _test():
-    print (version())
-    print ("serial version = {}".format(s.VERSION))
+    print(version())
+    print("serial version = {}".format(s.VERSION))
     for i in list_devices():
         print(i)
     with Teensy("/dev/ttyACM0") as teensy:
         print("current teensy time = {}".format(teensy.time()))
-        pass
 
 if __name__ == "__main__":
     _test()
