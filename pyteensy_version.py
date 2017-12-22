@@ -9,7 +9,7 @@ minor version number should be odd for nightly build and even for stable builds.
 name = "pyteensy"
 
 pyteensy_major = 0
-pyteensy_minor = 2
+pyteensy_minor = 3
 pyteensy_micro = 0
 
 def get_version_major():
