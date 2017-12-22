@@ -121,13 +121,13 @@ class _TeensyPackage(object):
         '''
         return self._payload_dict[self.buf[1]](self.buf)
 
-    def __init__(self, buffer : bytearray = bytearray()):
+    def __init__(self, buffer: bytearray=bytearray()):
         self.buf = buffer
 
     def __iter__(self):
         return iter(self.buf)
 
-    def set_buffer(self, buf : bytearray):
+    def set_buffer(self, buf: bytearray):
         '''Set the buffer of the _TeensyPackage'''
         self.buf = buf
 
@@ -136,7 +136,7 @@ class _TeensyPackage(object):
         if self.buf and len(self.buf) >= 2:
             return self.pkgtype() in self._events
         else:
-            return false
+            return False
 
     def prepare_identify(self, uuid):
         '''Prepares a Teensy packet to send an identify message to the Teensy.
@@ -373,7 +373,7 @@ class Teensy(object):
         '''
         self._thread = threading.Thread(target=self.run, name=repr(self))
         self._thread.start()
-        
+
         #sync with thread
         ans = self._aqueue.get(True, 1)
         if ans:
@@ -420,7 +420,7 @@ class Teensy(object):
         '''
         self.events.put(event)
 
-    def _read_packet(self, handle_event:bool=True) -> _TeensyPackage:
+    def _read_packet(self, handle_event: bool=True)->_TeensyPackage:
         '''Reads one packet from the stream, if it is an event it will be
         handled.'''
         while True:
@@ -556,18 +556,18 @@ class Teensy(object):
         else:
             return TeensyError(TeensyError.TEENSY_ERROR), None
 
-    def time_set(self, time_us:int):
+    def time_set(self, time_us: int):
         '''Sets the time in us on the teensy.
         '''
         if not self.connected:
             raise TeensyError(TeensyError.NOT_CONNECTED)
-        task = _TeensyTask(_TeensyPackage.DEREGISTER_INPUT, line)
+        task = _TeensyTask(_TeensyPackage.DEREGISTER_INPUT, time_us)
         self._tqueue.put(task)
         reply = self._aqueue.get()
         if reply:
             raise TeensyError(reply)
 
-    def _time_set(self, time_us:int):
+    def _time_set(self, time_us: int):
         package = _TeensyPackage()
         package.prepare_set_time(time_us)
         self._write_packet(package)
@@ -576,7 +576,7 @@ class Teensy(object):
         assert reply == _TeensyPackage.ACKNOWLEDGE_SUCCES
         return TeensyError.NO_ERROR
 
-    def sync_clock(self, cclock:callable, thres_us:int=100):
+    def sync_clock(self, cclock: callable, thres_us: int=100):
         '''Synchronizes the teensy with the cclock. The cclock must be a
         callable function or object that can safely operate from another
         thread. Also when called it should provide time in a integral value
@@ -591,7 +591,7 @@ class Teensy(object):
         if not self.connected:
             raise TeensyError(TeensyError.NOT_CONNECTED)
 
-        if type(cclock()) != type(int()):
+        if not isinstance(cclock(), int):
             raise ValueError("cclock() must return an integer in µs")
 
         task = _TeensyTask(self.SYNC_CLOCK, cclock, thres_us)
@@ -600,14 +600,14 @@ class Teensy(object):
         if reply:
             raise TeensyError(reply)
 
-    def _sync_clock(self, cclock:callable, thres_us:int=100) -> int:
+    def _sync_clock(self, cclock: callable, thres_us: int=100) -> int:
         synced = False
         tries = 10
         while not synced:
-            for i in range(tries):
+            for _ in range(tries):
                 tim = cclock()
                 self._time_set(tim)
-                err, teensy_time= self._time()
+                err, teensy_time = self._time()
                 if err:
                     return err
                 synced = teensy_time - tim < thres_us
@@ -625,7 +625,7 @@ class Teensy(object):
         tasks = {
             # values not from _TeensyPackage (these should be negative)
             self.SYNC_CLOCK         : self._sync_clock,
-            
+
             #values from _TeensyPackage (these should be positive)
             tp.IDENTIFY             : None, # is handled differently
             tp.REGISTER_INPUT       : self._register_line,
@@ -652,7 +652,7 @@ class UnixTeensy(Teensy):
     consumes about all the processing power of one processor core. This class
     is written to address that issue.
     '''
-    
+
     def __init__(self, devfn="/dev/ttyACM0"):
         ''' Opens communication with serial device.
         devfn is a path to the device name or something like COM5 on windows.
@@ -689,7 +689,7 @@ class UnixTeensy(Teensy):
         '''
         if self.connected:
             self.close()
-        
+
         flags = os.O_RDWR
         try:
             # UNIX flavors
@@ -702,7 +702,7 @@ class UnixTeensy(Teensy):
             self._serial = os.open(devfn, flags)
         except OSError as err:
             raise TeensyError(TeensyError.UNABLE_TO_CONNECT, str(err))
-        
+
         # empty queues to be sure.
         self._tqueue = q.Queue()
         self._aqueue = q.Queue()
@@ -738,7 +738,7 @@ class UnixTeensy(Teensy):
                     while fevents:
                         self._fetch_event()
                         fevents = poller.poll(timeout)
-                        
+
         except Exception:
             # Abort from thread when an uncaught exception occurs.
             import sys
@@ -746,8 +746,8 @@ class UnixTeensy(Teensy):
             print(traceback.print_exc(), file=sys.stderr)
             self.connected = False
             return
-    
-    def _read_packet(self, handle_event:bool=True) -> _TeensyPackage:
+
+    def _read_packet(self, handle_event: bool=True) -> _TeensyPackage:
         '''Reads one packet from the stream, if it is an event it will be
         handled.'''
         while True:
@@ -769,13 +769,12 @@ class UnixTeensy(Teensy):
         os.write(self._serial, pkt.buf)
 
 def _test():
-    print (version())
-    print ("serial version = {}".format(s.VERSION))
+    print(version())
+    print("serial version = {}".format(s.VERSION))
     for i in list_devices():
         print(i)
     with Teensy("/dev/ttyACM0") as teensy:
         print("current teensy time = {}".format(teensy.time()))
-        pass
 
 if __name__ == "__main__":
     _test()
