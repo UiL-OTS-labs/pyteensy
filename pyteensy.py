@@ -246,13 +246,15 @@ class TeensyError(Exception):
     UNABLE_TO_CONNECT = 3
     INVALID_TRIGGER_LINE = 4
     TEENSY_ERROR = 5
+    UNABLE_TO_SYNC = 6
 
     _errdict = {
         NOT_A_TEENSY        : "Connected to something that is not a Teensy",
         NOT_CONNECTED       : "Operation requires a valid connection",
         UNABLE_TO_CONNECT   : "Unable to connect",
         INVALID_TRIGGER_LINE: "Invalid trigger line",
-        TEENSY_ERROR        : "Unspecified Teensy error."
+        TEENSY_ERROR        : "Unspecified Teensy error.",
+        UNABLE_TO_SYNC      : "Unable to synchronize the clock."
     }
 
     def __init__(self, error, extra=None):
@@ -306,6 +308,13 @@ class Teensy(object):
     '''
 
     READ_TIMEOUT = 0.0001
+
+    # Values used as for the _handle task these values must be negative
+    # otherwise they might get into conflict with the _TeensyPacket.SET_TIME
+    # etc values
+
+    #ask thread to sync the clocks.
+    SYNC_CLOCK = -1
 
     def __init__(self, devfn="/dev/ttyACM0"):
         ''' Opens communication with serial device.
@@ -431,6 +440,7 @@ class Teensy(object):
     def _write_packet(self, pkt: _TeensyPackage):
         '''Write one teensy packet to the Teensy Device.'''
         self._serial.write(pkt)
+        self._serial.flush()
 
     def _fetch_event(self):
         '''Try to read one event from the serial device.'''
@@ -546,13 +556,65 @@ class Teensy(object):
         else:
             return TeensyError(TeensyError.TEENSY_ERROR), None
 
-    def time_set(self, time):
+    def time_set(self, time_us:int):
+        '''Sets the time in us on the teensy.
         '''
-        '''
-        pass
+        if not self.connected:
+            raise TeensyError(TeensyError.NOT_CONNECTED)
+        task = _TeensyTask(_TeensyPackage.DEREGISTER_INPUT, line)
+        self._tqueue.put(task)
+        reply = self._aqueue.get()
+        if reply:
+            raise TeensyError(reply)
 
-    def _time_set(self):
-        pass
+    def _time_set(self, time_us:int):
+        package = _TeensyPackage()
+        package.prepare_set_time(time_us)
+        self._write_packet(package)
+        package = self._read_packet()
+        _, reply = package.parse_packet()
+        assert reply == _TeensyPackage.ACKNOWLEDGE_SUCCES
+        return TeensyError.NO_ERROR
+
+    def sync_clock(self, cclock:callable, thres_us:int=100):
+        '''Synchronizes the teensy with the cclock. The cclock must be a
+        callable function or object that can safely operate from another
+        thread. Also when called it should provide time in a integral value
+        in us.
+        thres_us is the threshold, in order to sync the time is set and
+        asked back from the teensy, this returned value must be less than
+        the threshold.
+        Note although syncs the clocks, this function does not correct for
+        clock drift. Hence, over time, the clock of the Teensy might drift
+        away from cclock.
+        '''
+        if not self.connected:
+            raise TeensyError(TeensyError.NOT_CONNECTED)
+
+        if type(cclock()) != type(int()):
+            raise ValueError("cclock() must return an integer in µs")
+
+        task = _TeensyTask(self.SYNC_CLOCK, cclock, thres_us)
+        self._tqueue.put(task)
+        reply = self._aqueue.get()
+        if reply:
+            raise TeensyError(reply)
+
+    def _sync_clock(self, cclock:callable, thres_us:int=100) -> int:
+        synced = False
+        tries = 10
+        while not synced:
+            for i in range(tries):
+                tim = cclock()
+                self._time_set(tim)
+                err, teensy_time= self._time()
+                if err:
+                    return err
+                synced = teensy_time - tim < thres_us
+                if synced:
+                    break
+            break
+        return TeensyError.NO_ERROR if synced else TeensyError.UNABLE_TO_SYNC
 
     def _handle_task(self, task):
         '''Handles a Teensy task, like registering a input line etc.
@@ -561,7 +623,11 @@ class Teensy(object):
         #alias
         tp = _TeensyPackage
         tasks = {
-            #tp.IDENTIFY             : None, # is handled differently
+            # values not from _TeensyPackage (these should be negative)
+            self.SYNC_CLOCK         : self._sync_clock,
+            
+            #values from _TeensyPackage (these should be positive)
+            tp.IDENTIFY             : None, # is handled differently
             tp.REGISTER_INPUT       : self._register_line,
             tp.REGISTER_SINGLE_SHOT : self._register_single_shot,
             tp.DEREGISTER_INPUT     : self._deregister_input,
