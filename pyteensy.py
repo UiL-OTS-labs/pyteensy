@@ -24,6 +24,9 @@ import struct
 import threading
 import select
 import os
+if os.name == "posix":
+    import termios
+    import tty
 
 try:
     # python 3
@@ -653,6 +656,15 @@ class UnixTeensy(Teensy):
     is written to address that issue.
     '''
 
+    #constants for accessing list from/for tcgetattr/tcsetattr
+    iflag = 0
+    oflag = 1
+    cflag = 2
+    lflag = 3
+    ispeed = 4
+    ospeed = 5
+    cc = 6
+
     def __init__(self, devfn="/dev/ttyACM0"):
         ''' Opens communication with serial device.
         devfn is a path to the device name or something like COM5 on windows.
@@ -680,6 +692,8 @@ class UnixTeensy(Teensy):
         self._thread.join(0.1)
         if self._thread.isAlive():
             raise RuntimeError("Unable to close Teensy thread.")
+
+        termios.tcsetattr(self._serial, termios.TCSADRAIN, self._oldattr)
         os.close(self._serial)
 
     def connect(self, devfn):
@@ -699,7 +713,15 @@ class UnixTeensy(Teensy):
             flags |= os.O_BINARY
 
         try:
-            self._serial = os.open(devfn, flags)
+            self._serial  = os.open(devfn, flags)
+            self._oldattr = termios.tcgetattr(self._serial)
+            if self._oldattr[self.cflag] & termios.ICANON:
+                print("tty is in canonical mode")
+            else:
+                print("tty is not in canonical mode.")
+            print ("vmin = {}".format(self._oldattr[self.cc][termios.VMIN]))
+            print ("vtime= {}".format(self._oldattr[self.cc][termios.VTIME]))
+            tty.setraw(self._serial, termios.TCSADRAIN)
         except OSError as err:
             raise TeensyError(TeensyError.UNABLE_TO_CONNECT, str(err))
 
@@ -767,6 +789,7 @@ class UnixTeensy(Teensy):
     def _write_packet(self, pkt: _TeensyPackage):
         '''Write one teensy packet to the Teensy Device.'''
         os.write(self._serial, pkt.buf)
+        termios.tcdrain(self._serial)
 
 def _test():
     print(version())
